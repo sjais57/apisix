@@ -1,0 +1,41 @@
+curl http://127.0.0.1:9180/apisix/admin/routes/1 \
+  -H "X-API-KEY: your-admin-api-key" \
+  -X PUT \
+  -d '
+{
+  "uri": "/test-kafka",
+  "plugins": {
+    "kafka-logger": {
+      "brokers": [
+        {
+          "host": "kafka-broker-host",
+          "port": 9092
+        }
+      ],
+      "kafka_topic": "apisix-logs",
+      "producer_type": "async",
+      "required_acks": 1
+    }
+  },
+  "upstream": {
+    "type": "roundrobin",
+    "nodes": {
+      "httpbin.org:80": 1
+    }
+  }
+}'
+
+
+"brokers": [
+  {
+    "host": "kafka-broker-host",
+    "port": 9092,
+    "sasl_config": {
+      "mechanism": "PLAIN",
+      "user": "your-username",
+      "password": "your-password"
+    }
+  }
+]
+
+
