@@ -1,22 +1,28 @@
-curl -X PUT http://<APISIX-ADMIN-IP>:<PORT>/apisix/admin/routes/1 \
--H 'X-API-KEY: <YOUR-APISIX-ADMIN-KEY>' \
--H 'Content-Type: application/json' \
+curl -X PUT http://<APISIX-ADMIN-IP>:9180/apisix/admin/routes/1 \
+-H "X-API-KEY: <your-admin-key>" \
+-H "Content-Type: application/json" \
 -d '{
   "uri": "/test-kafka",
+  "name": "kafka-test",
   "plugins": {
     "kafka-logger": {
-      "broker_list": {
-        "192.168.1.100:9092": 1
-      },
+      "brokers": [
+        {
+          "host": "192.168.1.100",
+          "port": 9092,
+          "sasl_config": {
+            "mechanism": "PLAIN",
+            "user": "apisix-user",
+            "password": "secret"
+          },
+          "ssl": {
+            "enable": true,
+            "verify": false
+          }
+        }
+      ],
       "kafka_topic": "apisix-logs",
-      "key": "apisix-log-key",
-      "timeout": 3,
-      "name": "kafka logger",
-      "max_retry_count": 3,
-      "retry_delay": 1,
-      "buffer_duration": 60,
-      "inactive_timeout": 5,
-      "batch_max_size": 1000,
+      "producer_type": "sync",
       "include_req_body": true,
       "include_resp_body": true
     }
@@ -28,46 +34,3 @@ curl -X PUT http://<APISIX-ADMIN-IP>:<PORT>/apisix/admin/routes/1 \
     }
   }
 }'
-
-=====================
-curl http://127.0.0.1:9180/apisix/admin/routes/1 \
-  -H "X-API-KEY: your-admin-api-key" \
-  -X PUT \
-  -d '
-{
-  "uri": "/test-kafka",
-  "plugins": {
-    "kafka-logger": {
-      "brokers": [
-        {
-          "host": "kafka-broker-host",
-          "port": 9092
-        }
-      ],
-      "kafka_topic": "apisix-logs",
-      "producer_type": "async",
-      "required_acks": 1
-    }
-  },
-  "upstream": {
-    "type": "roundrobin",
-    "nodes": {
-      "httpbin.org:80": 1
-    }
-  }
-}'
-
-
-"brokers": [
-  {
-    "host": "kafka-broker-host",
-    "port": 9092,
-    "sasl_config": {
-      "mechanism": "PLAIN",
-      "user": "your-username",
-      "password": "your-password"
-    }
-  }
-]
-
-
