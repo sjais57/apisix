@@ -1,0 +1,41 @@
+curl http://127.0.0.1:9180/apisix/admin/routes/1 -X PUT -d '
+{
+  "uri": "/test-kafka",
+  "plugins": {
+    "key-auth": {},
+    "consumer-restriction": {
+      "whitelist": ["service-1234"],
+      "rejected_code": 403,
+      "rejected_msg": "Access denied: Not an authorized service"
+    },
+    "kafka-logger": {
+      "brokers": [
+        {
+          "host": "kafka.example.com",
+          "port": 9093
+        }
+      ],
+      "topic": "apisix-logs",
+      "key": "log-key",
+      "name": "kafka-logger",
+      "include_req_body": true,
+      "include_resp_body": true,
+      "sasl": {
+        "enable": true,
+        "mechanism": "PLAIN",
+        "user": "kafka_user",
+        "password": "kafka_pass"
+      },
+      "ssl": {
+        "enable": true,
+        "verify": false
+      }
+    }
+  },
+  "upstream": {
+    "type": "roundrobin",
+    "nodes": {
+      "httpbin.org:80": 1
+    }
+  }
+}'
