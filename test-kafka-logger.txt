@@ -39,3 +39,71 @@ curl http://127.0.0.1:9180/apisix/admin/routes/1 -X PUT -d '
     }
   }
 }'
+
+
+========================
+Test 2:
+
+curl http://127.0.0.1:9180/apisix/admin/routes/1 -H 'X-API-KEY: your-admin-key' -X PUT -d '
+{
+  "uri": "/fastapi/*",
+  "plugins": {
+    "kafka-logger": {
+      "broker_list": {
+        "kafka-broker1:9092": 1,
+        "kafka-broker2:9092": 1
+      },
+      "kafka_topic": "fastapi-logs",
+      "key": "fastapi-request",
+      "timeout": 5,
+      "batch_max_size": 1,  # Immediate sending for testing
+      "inactive_timeout": 1,
+      "include_req_body": true,
+      "include_resp_body": true,
+      "metadata": {
+        "service": "fastapi-service",
+        "environment": "production"
+      }
+    }
+  },
+  "upstream": {
+    "nodes": {
+      "your-fastapi-server:8000": 1
+    },
+    "type": "roundrobin"
+  }
+}'
+
+===============================================================
+
+Test 3:
+curl http://127.0.0.1:9180/apisix/admin/routes/1 -H 'X-API-KEY: your-admin-key' -X PUT -d '
+{
+  "uri": "/fastapi/*",
+  "plugins": {
+    "kafka-logger": {
+      "broker_list": {
+        "kafka-broker1:9092": 1,
+        "kafka-broker2:9092": 1
+      },
+      "kafka_topic": "fastapi-logs",
+      "producer_type": "async",
+      "sasl": {
+        "username": "your-service-account",
+        "password": "your-service-account-password",
+        "mechanism": "PLAIN"  # or "SCRAM-SHA-256", "SCRAM-SHA-512"
+      },
+      "ssl": true,  # Enable if your Kafka uses SSL
+      "ssl_verify": false,  # Set to true in production with proper CA
+      "required_acks": 1,
+      "timeout": 5000,
+      "name": "kafka-logger"
+    }
+  },
+  "upstream": {
+    "nodes": {
+      "your-fastapi-server:8000": 1
+    },
+    "type": "roundrobin"
+  }
+}'
