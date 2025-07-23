@@ -105,6 +105,102 @@ local producer_lib = require("resty.kafka.producer")
 local batch_processor = require("apisix.utils.batch-processor")
 local plugin_name = "kafka-logger"
 
+-- declare plugin state
+local processor
+
+-- create producer
+local function create_producer(conf)
+    local broker_list = {}
+    for _, broker in ipairs(conf.brokers) do
+        table.insert(broker_list, broker.host .. ":" .. broker.port)
+    end
+
+    local config = {
+        producer_type = conf.producer_type or "async",
+        socket_timeout = (conf.timeout or 3) * 1000,
+        max_retry = conf.max_retry_count or 0,
+        retry_backoff = (conf.retry_delay or 1) * 1000,
+        ssl = true,
+    }
+
+    if conf.sasl_config then
+        config.sasl_config = {
+            mechanism = conf.sasl_config.mechanism or "PLAIN",
+            user = conf.sasl_config.user,
+            password = conf.sasl_config.password,
+        }
+    end
+
+    return producer_lib.new(broker_list, config)
+end
+
+-- function to send to kafka
+local function send_to_kafka(entries, conf)
+    local producer, err = create_producer(conf)
+    if not producer then
+        core.log.error("failed to create Kafka producer: ", err)
+        return false
+    end
+
+    for _, entry in ipairs(entries) do
+        local ok, err = producer:send(conf.kafka_topic, conf.key or nil, core.json.encode(entry))
+        if not ok then
+            core.log.error("failed to send log to Kafka: ", err)
+            return false
+        end
+    end
+
+    return true
+end
+
+-- plugin log phase
+function _M.log(conf, ctx)
+    if not processor then
+        local process = function(entries)
+            return send_to_kafka(entries, conf)
+        end
+
+        local config = {
+            name = plugin_name,
+            retry_delay = conf.retry_delay or 1,
+            batch_max_size = conf.batch_max_size or 1000,
+            max_retry_count = conf.max_retry_count or 0,
+            buffer_duration = conf.buffer_duration or 60,
+        }
+
+        local err
+        processor, err = batch_processor:new(process, config)
+        if not processor then
+            core.log.error("failed to create batch processor: ", err)
+            return
+        end
+    end
+
+    local log_data = {
+        uri = ctx.var.request_uri,
+        method = ctx.var.request_method,
+        status = ngx.status,
+        client_ip = core.request.get_remote_client_ip(ctx),
+        timestamp = ngx.time(),
+    }
+
+    if conf.include_req_body then
+        ngx.req.read_body()
+        log_data.body = ngx.req.get_body_data()
+    end
+
+    local ok, err = processor:push(log_data)
+    if not ok then
+        core.log.error("failed to push log to batch processor: ", err)
+    end
+end
+==============
+Test 3:
+
+local core = require("apisix.core")
+local producer_lib = require("resty.kafka.producer")
+local plugin_name = "kafka-logger"
+
 local schema = {
     type = "object",
     properties = {
@@ -135,7 +231,7 @@ local schema = {
         include_req_body = { type = "boolean", default = false },
         timeout = { type = "integer", minimum = 1, default = 3 },
         batch_max_size = { type = "integer", minimum = 1, default = 1000 },
-        buffer_duration = { type = "integer", minimum = 1, default = 60 },
+        inactive_timeout = { type = "integer", minimum = 1, default = 5 },
         max_retry_count = { type = "integer", minimum = 0, default = 0 },
         retry_delay = { type = "integer", minimum = 0, default = 1 }
     },
@@ -148,6 +244,9 @@ local _M = {
     name = plugin_name,
     schema = schema,
 }
+
+-- Create a batch processor instance
+local bp_singleton
 
 local function create_producer(conf)
     local broker_list = {}
@@ -176,24 +275,23 @@ local function create_producer(conf)
     return producer_lib.new(broker_list, producer_config)
 end
 
-local function send_to_kafka(conf, log_message)
+local function send_to_kafka(conf, entries)
     local producer, err = create_producer(conf)
     if not producer then
-        core.log.error("failed to create Kafka producer: ", err)
-        return false, err
+        return false, "failed to create Kafka producer: " .. (err or "unknown error")
     end
 
-    local ok, err = producer:send(conf.kafka_topic, conf.key or nil, log_message)
+    local data = core.json.encode(entries)
+    local ok, err = producer:send(conf.kafka_topic, conf.key or nil, data)
     if not ok then
-        core.log.error("failed to send data to Kafka: ", err)
-        return false, err
+        return false, "failed to send data to Kafka: " .. (err or "unknown error")
     end
     return true
 end
 
 function _M.log(conf, ctx)
-    -- Get basic request info using core.request which is safe in log phase
-    local log_data = {
+    -- Get basic request info
+    local log_entry = {
         uri = ctx.var.request_uri or ctx.var.uri,
         method = ctx.var.request_method,
         status = ctx.var.status or ngx.status,
@@ -201,27 +299,36 @@ function _M.log(conf, ctx)
         time = ngx.time()
     }
 
-    -- For request body, we need to capture it earlier (not in log phase)
-    if conf.include_req_body and ctx.var.request_body then
-        log_data.body = ctx.var.request_body
+    -- Initialize batch processor if not exists
+    if not bp_singleton then
+        local err
+        bp_singleton, err = core.lrucache.new({
+            type = "plugin",
+            name = plugin_name,
+        })
+        if not bp_singleton then
+            core.log.error("failed to create batch processor: ", err)
+            return
+        end
     end
 
-    -- Use batch processor for better performance
+    -- Process log entry
     local process = function(entries)
-        return send_to_kafka(conf, core.json.encode(entries))
+        return send_to_kafka(conf, entries)
     end
 
     local config = {
-        name = "kafka logger",
+        name = "kafka_logger",
         retry_delay = conf.retry_delay,
         batch_max_size = conf.batch_max_size,
         max_retry_count = conf.max_retry_count,
-        buffer_duration = conf.buffer_duration,
+        inactive_timeout = conf.inactive_timeout,
     }
 
-    local ok, err = batch_processor:add_entry(conf, log_data, process, config)
+    -- Add to batch processor
+    local ok, err = bp_singleton:add(log_entry, process, config)
     if not ok then
-        core.log.error("failed to add entry to batch processor: ", err)
+        core.log.error("failed to add log entry: ", err)
     end
 end
 
