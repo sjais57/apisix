@@ -1,37 +1,52 @@
 Test 1:
-
 local core = require("apisix.core")
 local producer_lib = require("resty.kafka.producer")
 local plugin_name = "kafka-logger"
+local ngx_timer_at = ngx.timer.at
+local batch_processor = require("apisix.utils.batch-processor")
+local table_insert = table.insert
 
 local schema = {
     type = "object",
     properties = {
         brokers = {
             type = "array",
-            minItems = 1,
             items = {
                 type = "object",
                 properties = {
                     host = { type = "string" },
-                    port = { type = "integer", minimum = 1 }
+                    port = { type = "integer" }
                 },
                 required = { "host", "port" }
             }
         },
-        kafka_topic = { type = "string", minLength = 1 },
+        kafka_topic = { type = "string" },
+        producer_type = {
+            type = "string",
+            enum = { "async", "sync" },
+            default = "async"
+        },
+        timeout = { type = "integer", default = 5 },
+        max_retry_count = { type = "integer", default = 3 },
+        retry_delay = { type = "integer", default = 1 },
+        ssl_config = {
+            type = "object",
+            properties = {
+                cafile = { type = "string" },
+                certfile = { type = "string" },
+                keyfile = { type = "string" }
+            },
+            required = { "cafile", "certfile", "keyfile" }
+        },
         sasl_config = {
             type = "object",
             properties = {
+                mechanism = { type = "string", enum = { "PLAIN" } },
                 user = { type = "string" },
-                password = { type = "string" },
-                mechanism = { type = "string", enum = {"PLAIN"}, default = "PLAIN" }
+                password = { type = "string" }
             },
-            required = { "user", "password" }
-        },
-        producer_type = { type = "string", enum = { "async", "sync" }, default = "async" },
-        key = { type = "string" },
-        include_req_body = { type = "boolean", default = false }
+            required = { "mechanism", "user", "password" }
+        }
     },
     required = { "brokers", "kafka_topic" }
 }
@@ -43,58 +58,78 @@ local _M = {
     schema = schema,
 }
 
-function _M.log(conf, ctx)
-    -- Collect request data
-    local log_data = {
-        uri = ngx.var.request_uri,
-        method = ngx.req.get_method(),
-        headers = ngx.req.get_headers(),
-        status = ngx.status,
-        client_ip = core.request.get_remote_client_ip(ctx),
-        time = ngx.time()
+local function create_producer(conf)
+    local broker_list = {}
+    for _, broker in ipairs(conf.brokers) do
+        table_insert(broker_list, {
+            host = broker.host,
+            port = broker.port
+        })
+    end
+
+    local producer_config = {
+        producer_type = conf.producer_type,
+        socket_timeout = (conf.timeout or 5) * 1000,
+        max_retry = conf.max_retry_count or 3,
+        retry_backoff = (conf.retry_delay or 1) * 1000,
+        required_acks = 1,
+        keepalive = 60000,
+        ssl = true,
+        ssl_verify = false,  -- Set to true if your CA is valid
     }
 
-    if conf.include_req_body then
-        ngx.req.read_body()
-        log_data.body = ngx.req.get_body_data()
+    if conf.ssl_config then
+        producer_config.ssl_config = {
+            cafile = conf.ssl_config.cafile,
+            certfile = conf.ssl_config.certfile,
+            keyfile = conf.ssl_config.keyfile
+        }
     end
 
-    -- Convert brokers array to broker_list table
-    local broker_list = {}
-    for _, broker in ipairs(conf.brokers or {}) do
-        local host_port = broker.host .. ":" .. tostring(broker.port)
-        broker_list[host_port] = 1
+    if conf.sasl_config then
+        producer_config.sasl_config = {
+            mechanism = conf.sasl_config.mechanism,
+            user = conf.sasl_config.user,
+            password = conf.sasl_config.password
+        }
     end
 
-    if not next(broker_list) then
-        core.log.error("broker_list is empty or invalid")
-        return
-    end
+    return producer_lib.new(broker_list, producer_config)
+end
 
-    -- Init Kafka producer
-    local producer, err = producer_lib.new({
-        broker_list = broker_list,
-        producer_type = conf.producer_type or "async",
-        sasl_config = conf.sasl_config,
-        ssl = true
+local function send_to_kafka(conf, log_data)
+    local producer = create_producer(conf)
+    local ok, err = producer:send(conf.kafka_topic, nil, log_data)
+    if not ok then
+        core.log.error("failed to send message to Kafka: ", err)
+        return false
+    end
+    return true
+end
+
+function _M.log(conf, ctx)
+    local log_data = core.json.encode({
+        request = {
+            method = ctx.var.request_method,
+            uri = ctx.var.request_uri,
+            headers = ctx.var.http_headers,
+            body = ctx.var.request_body
+        },
+        response = {
+            status = ctx.var.status
+        },
+        client_ip = ctx.var.remote_addr,
+        time = ngx.time()
     })
 
-    if not producer then
-        core.log.error("Failed to create Kafka producer: ", err)
-        return
-    end
-
-    -- Send message
-    local ok, err = producer:send(conf.kafka_topic,
-                                  conf.key or nil,
-                                  core.json.encode(log_data))
-
+    local ok, err = send_to_kafka(conf, log_data)
     if not ok then
-        core.log.error("Failed to send log to Kafka: ", err)
+        core.log.error("failed to send log to Kafka: ", err)
     end
 end
 
 return _M
+
 
 
 ==================================
