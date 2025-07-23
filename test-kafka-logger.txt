@@ -1,63 +1,98 @@
 test 1:
-
 {
-  "uri": "/test-kafka",
+  "uri": "/your-api-endpoint",
   "plugins": {
     "kafka-logger": {
       "brokers": [
         {
-          "host": "your.kafka.host.com",
-          "port": 9093
+          "host": "kafka-server1",
+          "port": 9092,
+          "weight": 1
+        },
+        {
+          "host": "kafka-server2",
+          "port": 9092,
+          "weight": 1
         }
       ],
-      "topic": "access-logs",
-      "key": "test-key",
-      "name": "kafka-logger",
-      "ssl": true,
-      "sasl_config": {
-        "mechanism": "PLAIN",
-        "user": "kafka-user",
-        "password": "kafka-password"
-      }
+      "kafka_topic": "your-log-topic",  // Correct parameter name here
+      "producer": {
+        "request_timeout": 3000,
+        "socket_timeout": 3000,
+        "required_acks": 1
+      },
+      "buffer_duration": 60,
+      "max_retry_count": 3,
+      "retry_delay": 1,
+      "key": "api-logs",
+      "async": true,
+      "include_req_body": false,
+      "include_resp_body": false
     }
   },
   "upstream": {
     "type": "roundrobin",
     "nodes": {
-      "httpbin.org:80": 1
+      "your-backend-service:80": 1
     }
   }
 }
 
 
-===========================================
+===============
 test 2:
 
+curl http://127.0.0.1:9180/apisix/admin/routes/1 -H 'X-API-KEY: your-admin-key' -X PUT -d '
 {
-  "uri": "/your-api/*",
-  "methods": ["GET", "POST", "PUT", "DELETE"],
+  "uri": "/your-api-endpoint",
   "plugins": {
     "kafka-logger": {
-      "name": "kafka-logger",
-      "topic": "access-logs",
+      "brokers": [
+        {"host": "kafka-server1", "port": 9092},
+        {"host": "kafka-server2", "port": 9092}
+      ],
+      "topic": "your-log-topic",
+      "producer": {
+        "request_timeout": 5000
+      }
+    }
+  },
+  "upstream": {
+    "nodes": {
+      "your-backend-service:80": 1
+    },
+    "type": "roundrobin"
+  }
+}'
+
+
+
+==========
+test 3:
+
+curl http://127.0.0.1:9180/apisix/admin/routes/1001 -X PUT -d '
+{
+  "uri": "/secure-logs",
+  "plugins": {
+    "kafka-logger": {
       "brokers": [
         {
-          "host": "your.kafka.host.com",
+          "host": "your.kafka.host",
           "port": 9093
         }
       ],
+      "topic": "your-kafka-topic",
       "ssl": true,
-      "sasl_config": {
-        "mechanism": "PLAIN",
-        "user": "your-sasl-username",
-        "password": "your-sasl-password"
-      }
+      "ssl_verify": false,
+      "ssl_cert": "/etc/ssl/certs/client-cert.pem",
+      "ssl_key": "/etc/ssl/private/client-key.pem",
+      "ssl_ca_cert": "/etc/ssl/certs/ca-cert.pem"
     }
   },
   "upstream": {
     "type": "roundrobin",
     "nodes": {
-      "127.0.0.1:8080": 1
+      "127.0.0.1:1980": 1
     }
   }
-}
+}'
