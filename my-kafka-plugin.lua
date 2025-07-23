@@ -245,8 +245,10 @@ local _M = {
     schema = schema,
 }
 
--- Create a batch processor instance
-local bp_singleton
+-- Batch processor instance per configuration
+local batch_processors = core.lrucache.new({
+    ttl = 300, count = 1000
+})
 
 local function create_producer(conf)
     local broker_list = {}
@@ -299,34 +301,25 @@ function _M.log(conf, ctx)
         time = ngx.time()
     }
 
-    -- Initialize batch processor if not exists
-    if not bp_singleton then
-        local err
-        bp_singleton, err = core.lrucache.new({
-            type = "plugin",
-            name = plugin_name,
-        })
-        if not bp_singleton then
-            core.log.error("failed to create batch processor: ", err)
-            return
+    -- Get or create batch processor for this configuration
+    local bp = batch_processors(conf, nil, function()
+        local process = function(entries)
+            return send_to_kafka(conf, entries)
         end
-    end
 
-    -- Process log entry
-    local process = function(entries)
-        return send_to_kafka(conf, entries)
-    end
+        local config = {
+            name = "kafka_logger",
+            retry_delay = conf.retry_delay,
+            batch_max_size = conf.batch_max_size,
+            max_retry_count = conf.max_retry_count,
+            inactive_timeout = conf.inactive_timeout,
+        }
 
-    local config = {
-        name = "kafka_logger",
-        retry_delay = conf.retry_delay,
-        batch_max_size = conf.batch_max_size,
-        max_retry_count = conf.max_retry_count,
-        inactive_timeout = conf.inactive_timeout,
-    }
+        return core.batch_processor.new(process, config)
+    end)
 
-    -- Add to batch processor
-    local ok, err = bp_singleton:add(log_entry, process, config)
+    -- Add log entry to batch processor
+    local ok, err = bp:push(log_entry)
     if not ok then
         core.log.error("failed to add log entry: ", err)
     end
