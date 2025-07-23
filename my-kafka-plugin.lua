@@ -1,12 +1,8 @@
-test 1:
-
--- File: apisix/plugins/kafka-logger.lua
+Test 1:
 
 local core = require("apisix.core")
-local plugin = require("apisix.plugin")
 local producer_lib = require("resty.kafka.producer")
-local ngx = ngx
-local tostring = tostring
+local plugin_name = "kafka-logger"
 
 local schema = {
     type = "object",
@@ -35,15 +31,10 @@ local schema = {
         },
         producer_type = { type = "string", enum = { "async", "sync" }, default = "async" },
         key = { type = "string" },
-        include_req_body = { type = "boolean", default = false },
-        ssl_cert = { type = "string" },
-        ssl_key = { type = "string" },
-        ssl_verify = { type = "boolean", default = true }
+        include_req_body = { type = "boolean", default = false }
     },
     required = { "brokers", "kafka_topic" }
 }
-
-local plugin_name = "kafka-logger"
 
 local _M = {
     version = 0.1,
@@ -53,13 +44,14 @@ local _M = {
 }
 
 function _M.log(conf, ctx)
+    -- Collect request data
     local log_data = {
-        request_uri = ngx.var.request_uri,
-        request_method = ngx.req.get_method(),
-        request_headers = ngx.req.get_headers(),
+        uri = ngx.var.request_uri,
+        method = ngx.req.get_method(),
+        headers = ngx.req.get_headers(),
         status = ngx.status,
         client_ip = core.request.get_remote_client_ip(ctx),
-        timestamp = ngx.time()
+        time = ngx.time()
     }
 
     if conf.include_req_body then
@@ -67,32 +59,32 @@ function _M.log(conf, ctx)
         log_data.body = ngx.req.get_body_data()
     end
 
-    local brokers = {}
-    for _, b in ipairs(conf.brokers) do
-        brokers[#brokers + 1] = b.host .. ":" .. b.port
+    -- Convert brokers array to broker_list table
+    local broker_list = {}
+    for _, broker in ipairs(conf.brokers or {}) do
+        local host_port = broker.host .. ":" .. tostring(broker.port)
+        broker_list[host_port] = 1
     end
 
-    local kafka_conf = {
-        broker_list = brokers,
-        producer_type = conf.producer_type or "async",
-        sasl_config = conf.sasl_config and {
-            mechanism = conf.sasl_config.mechanism,
-            user = conf.sasl_config.user,
-            password = conf.sasl_config.password
-        } or nil,
-        ssl = true,
-        ssl_cert = conf.ssl_cert,
-        ssl_key = conf.ssl_key,
-        ssl_verify = conf.ssl_verify
-    }
+    if not next(broker_list) then
+        core.log.error("broker_list is empty or invalid")
+        return
+    end
 
-    local producer, err = producer_lib.new(kafka_conf)
+    -- Init Kafka producer
+    local producer, err = producer_lib.new({
+        broker_list = broker_list,
+        producer_type = conf.producer_type or "async",
+        sasl_config = conf.sasl_config,
+        ssl = true
+    })
 
     if not producer then
         core.log.error("Failed to create Kafka producer: ", err)
         return
     end
 
+    -- Send message
     local ok, err = producer:send(conf.kafka_topic,
                                   conf.key or nil,
                                   core.json.encode(log_data))
@@ -105,39 +97,15 @@ end
 return _M
 
 
-
-==================
-
-test 2:
+==================================
+Test 2:
 
 -- kafka-logger.lua
---
--- Licensed to the Apache Software Foundation (ASF) under one or more
--- contributor license agreements.  See the NOTICE file distributed with
--- this work for additional information regarding copyright ownership.
--- The ASF licenses this file to You under the Apache License, Version 2.0
--- (the "License"); you may not use this file except in compliance with
--- the License.  You may obtain a copy of the License at
---
---     http://www.apache.org/licenses/LICENSE-2.0
---
--- Unless required by applicable law or agreed to in writing, software
--- distributed under the License is distributed on an "AS IS" BASIS,
--- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
--- See the License for the specific language governing permissions and
--- limitations under the License.
-
 local core       = require("apisix.core")
 local producer   = require("resty.kafka.producer")
 local batch_processor = require("apisix.utils.batch-processor")
 local plugin_name = "kafka-logger"
-local pairs      = pairs
-local ipairs     = ipairs
-local tostring   = tostring
-local table      = table
 local ngx        = ngx
-local string     = string
-local type       = type
 
 local schema = {
     type = "object",
@@ -162,19 +130,6 @@ local schema = {
         batch_max_size = {type = "integer", minimum = 1, default = 1000},
         include_req_body = {type = "boolean", default = false},
         include_resp_body = {type = "boolean", default = false},
-        include_req_body_expr = {
-            type = "array",
-            items = {
-                type = "array"
-            }
-        },
-        include_resp_body_expr = {
-            type = "array",
-            items = {
-                type = "array"
-            }
-        },
-        meta_format = {type = "string", enum = {"default", "origin"}, default = "default"},
         producer_type = {type = "string", enum = {"async", "sync"}, default = "async"},
         required_acks = {type = "integer", minimum = 0, maximum = 2, default = 1},
         partition_id = {type = "integer", minimum = 0, default = 0},
@@ -186,36 +141,31 @@ local schema = {
     required = {"bootstrap", "kafka_topic"}
 }
 
-local metadata_schema = {
-    type = "object",
-    properties = {
-        log_format = core.logger.metadata_schema.properties.log_format
-    }
-}
-
 local _M = {
     version = 0.1,
     priority = 403,
     name = plugin_name,
-    schema = schema,
-    metadata_schema = metadata_schema
+    schema = schema
 }
 
-function _M.check_schema(conf, schema_type)
-    if schema_type == core.schema.TYPE_METADATA then
-        return core.schema.check(metadata_schema, conf)
-    end
+function _M.check_schema(conf)
     return core.schema.check(schema, conf)
 end
 
-local function get_partition_id(conf)
-    if conf.partition_id then
-        return conf.partition_id
-    end
-    return 0
-end
-
 local function create_producer(conf)
+    -- Convert bootstrap to broker_list format expected by resty.kafka
+    local broker_list = {}
+    for _, broker in ipairs(conf.bootstrap) do
+        local host, port = broker:match("^(.+):(%d+)$")
+        if host and port then
+            table.insert(broker_list, {host = host, port = port})
+        end
+    end
+
+    if #broker_list == 0 then
+        return nil, "no valid brokers configured"
+    end
+
     local producer_config = {
         producer_type = conf.producer_type,
         required_acks = conf.required_acks,
@@ -238,54 +188,36 @@ local function create_producer(conf)
         producer_config.ssl_verify = conf.ssl_verify
     end
 
-    return producer:new(conf.bootstrap, producer_config)
+    return producer:new(broker_list, producer_config)
 end
 
 local function send_to_kafka(conf, log_message)
-    local prod = create_producer(conf)
-    local ok, err = prod:send(conf.kafka_topic, get_partition_id(conf), conf.key, log_message)
+    local prod, err = create_producer(conf)
+    if not prod then
+        core.log.error("failed to create Kafka producer: ", err)
+        return false, err
+    end
+
+    local ok, err = prod:send(conf.kafka_topic, conf.partition_id or 0, conf.key, log_message)
     if not ok then
-        core.log.error("failed to send data to Kafka topic[", conf.kafka_topic,
-                      "] err:", err)
+        core.log.error("failed to send data to Kafka topic[", conf.kafka_topic, "]: ", err)
         return false, err
     end
     return true
 end
 
-local function combine_logs(conf, entries)
-    local combined = {}
-    for _, entry in ipairs(entries) do
-        if conf.meta_format == "origin" then
-            table.insert(combined, core.json.encode(entry))
-        else
-            table.insert(combined, string.format("%s %s %s %s %s",
-                entry.request and entry.request.upstream or "-",
-                entry.request and entry.request.uri or "-",
-                entry.response and entry.response.status or "-",
-                entry.latency or "-",
-                entry.service and entry.service.name or "-"
-            ))
-        end
-    end
-    return table.concat(combined, "\n")
-end
-
 function _M.log(conf, ctx)
-    local entry
-    if conf.meta_format == "origin" then
-        entry = core.log.get_full_log(ngx, conf)
-    else
-        entry = core.log.get_log(ngx, conf)
-    end
-
-    local log_buffer = core.tablepool.fetch("kafka_log_buffer", 0, 4)
-    log_buffer.entry = entry
-    log_buffer.conf = conf
+    local entry = core.log.get_full_log(ngx, conf)
 
     local process = function(entries)
-        local data = combine_logs(conf, entries)
+        local data = core.json.encode(entries)
         return send_to_kafka(conf, data)
     end
+
+    local log_buffer = {
+        entry = entry,
+        conf = conf
+    }
 
     local config = {
         name = conf.name,
@@ -299,7 +231,6 @@ function _M.log(conf, ctx)
     local ok, err = batch_processor:add_entry(conf, log_buffer, process, config)
     if not ok then
         core.log.error("error when adding entry to batch processor: ", err)
-        core.tablepool.release("kafka_log_buffer", log_buffer)
     end
 end
 
