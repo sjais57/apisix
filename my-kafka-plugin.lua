@@ -1,34 +1,37 @@
 Test 1:
 local core = require("apisix.core")
-local producer_lib = require("resty.kafka.producer")
-local plugin_name = "kafka-logger"
-local ngx_timer_at = ngx.timer.at
+local plugin = require("apisix.plugin")
 local batch_processor = require("apisix.utils.batch-processor")
-local table_insert = table.insert
+local producer_lib = require("resty.kafka.producer")
+
+local plugin_name = "kafka-logger"
 
 local schema = {
     type = "object",
     properties = {
         brokers = {
             type = "array",
+            minItems = 1,
             items = {
                 type = "object",
                 properties = {
                     host = { type = "string" },
-                    port = { type = "integer" }
+                    port = { type = "integer", minimum = 1 }
                 },
                 required = { "host", "port" }
             }
         },
-        kafka_topic = { type = "string" },
-        producer_type = {
-            type = "string",
-            enum = { "async", "sync" },
-            default = "async"
+        kafka_topic = { type = "string", minLength = 1 },
+        key = { type = "string" },
+        sasl_config = {
+            type = "object",
+            properties = {
+                user = { type = "string" },
+                password = { type = "string" },
+                mechanism = { type = "string", enum = { "PLAIN" }, default = "PLAIN" }
+            },
+            required = { "user", "password" }
         },
-        timeout = { type = "integer", default = 5 },
-        max_retry_count = { type = "integer", default = 3 },
-        retry_delay = { type = "integer", default = 1 },
         ssl_config = {
             type = "object",
             properties = {
@@ -38,17 +41,15 @@ local schema = {
             },
             required = { "cafile", "certfile", "keyfile" }
         },
-        sasl_config = {
-            type = "object",
-            properties = {
-                mechanism = { type = "string", enum = { "PLAIN" } },
-                user = { type = "string" },
-                password = { type = "string" }
-            },
-            required = { "mechanism", "user", "password" }
-        }
+        include_req_body = { type = "boolean", default = false },
+        producer_type = { type = "string", enum = { "sync", "async" }, default = "async" },
+        timeout = { type = "integer", default = 3 },
+        max_retry_count = { type = "integer", default = 0 },
+        retry_delay = { type = "integer", default = 1 },
+        batch_max_size = { type = "integer", default = 1000 },
+        buffer_duration = { type = "integer", default = 60 },
     },
-    required = { "brokers", "kafka_topic" }
+    required = { "brokers", "kafka_topic", "sasl_config", "ssl_config" }
 }
 
 local _M = {
@@ -61,7 +62,7 @@ local _M = {
 local function create_producer(conf)
     local broker_list = {}
     for _, broker in ipairs(conf.brokers) do
-        table_insert(broker_list, {
+        table.insert(broker_list, {
             host = broker.host,
             port = broker.port
         })
@@ -69,68 +70,74 @@ local function create_producer(conf)
 
     local producer_config = {
         producer_type = conf.producer_type,
-        socket_timeout = (conf.timeout or 5) * 1000,
-        max_retry = conf.max_retry_count or 3,
-        retry_backoff = (conf.retry_delay or 1) * 1000,
-        required_acks = 1,
-        keepalive = 60000,
+        socket_timeout = conf.timeout * 1000,
+        max_retry = conf.max_retry_count,
+        retry_backoff = conf.retry_delay * 1000,
         ssl = true,
-        ssl_verify = false,  -- Set to true if your CA is valid
-    }
-
-    if conf.ssl_config then
-        producer_config.ssl_config = {
+        ssl_verify = false,
+        sasl_config = {
+            mechanism = conf.sasl_config.mechanism,
+            username = conf.sasl_config.user,
+            password = conf.sasl_config.password,
+        },
+        ssl_config = {
             cafile = conf.ssl_config.cafile,
             certfile = conf.ssl_config.certfile,
-            keyfile = conf.ssl_config.keyfile
+            keyfile = conf.ssl_config.keyfile,
         }
-    end
-
-    if conf.sasl_config then
-        producer_config.sasl_config = {
-            mechanism = conf.sasl_config.mechanism,
-            user = conf.sasl_config.user,
-            password = conf.sasl_config.password
-        }
-    end
+    }
 
     return producer_lib.new(broker_list, producer_config)
 end
 
-local function send_to_kafka(conf, log_data)
-    local producer = create_producer(conf)
-    local ok, err = producer:send(conf.kafka_topic, nil, log_data)
+local function send_to_kafka(conf, log_message)
+    local producer, err = create_producer(conf)
+    if not producer then
+        core.log.error("failed to create Kafka producer: ", err)
+        return false
+    end
+
+    local ok, err = producer:send(conf.kafka_topic, conf.key or nil, log_message)
     if not ok then
         core.log.error("failed to send message to Kafka: ", err)
         return false
     end
+
     return true
 end
 
 function _M.log(conf, ctx)
-    local log_data = core.json.encode({
-        request = {
-            method = ctx.var.request_method,
-            uri = ctx.var.request_uri,
-            headers = ctx.var.http_headers,
-            body = ctx.var.request_body
-        },
-        response = {
-            status = ctx.var.status
-        },
-        client_ip = ctx.var.remote_addr,
-        time = ngx.time()
-    })
+    local log_data = {
+        uri = ctx.var.request_uri,
+        method = ctx.var.request_method,
+        status = ctx.var.status,
+        client_ip = core.request.get_remote_client_ip(ctx),
+        time = ngx.time(),
+    }
 
-    local ok, err = send_to_kafka(conf, log_data)
+    if conf.include_req_body and ctx.var.request_body then
+        log_data.body = ctx.var.request_body
+    end
+
+    local process = function(entries)
+        return send_to_kafka(conf, core.json.encode(entries))
+    end
+
+    local bp_conf = {
+        name = plugin_name,
+        retry_delay = conf.retry_delay,
+        batch_max_size = conf.batch_max_size,
+        max_retry_count = conf.max_retry_count,
+        buffer_duration = conf.buffer_duration,
+    }
+
+    local ok, err = batch_processor.append_entry(conf, log_data, process, bp_conf)
     if not ok then
-        core.log.error("failed to send log to Kafka: ", err)
+        core.log.error("failed to add entry to batch processor: ", err)
     end
 end
 
 return _M
-
-
 
 ==================================
 Test 2:
