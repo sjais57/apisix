@@ -123,16 +123,36 @@ local schema = {
             }
         },
         kafka_topic = { type = "string", minLength = 1 },
+
         sasl_config = {
             type = "object",
             properties = {
                 user = { type = "string" },
                 password = { type = "string" },
-                mechanism = { type = "string", enum = { "PLAIN" }, default = "PLAIN" }
+                mechanism = {
+                    type = "string",
+                    enum = { "PLAIN" },
+                    default = "PLAIN"
+                }
             },
             required = { "user", "password" }
         },
-        producer_type = { type = "string", enum = { "sync", "async" }, default = "async" },
+
+        ssl_config = {
+            type = "object",
+            properties = {
+                cafile = { type = "string" },
+                certfile = { type = "string" },
+                keyfile = { type = "string" }
+            },
+            required = { "cafile", "certfile", "keyfile" }
+        },
+
+        producer_type = {
+            type = "string",
+            enum = { "sync", "async" },
+            default = "async"
+        },
         key = { type = "string" },
         include_req_body = { type = "boolean", default = false },
         timeout = { type = "integer", minimum = 1, default = 3 },
@@ -164,14 +184,26 @@ local function create_producer(conf)
         producer_type = conf.producer_type,
         socket_timeout = conf.timeout * 1000,
         max_retry = conf.max_retry_count,
-        retry_backoff = conf.retry_delay * 1000
+        retry_backoff = conf.retry_delay * 1000,
     }
 
+    -- Add SASL auth if configured
     if conf.sasl_config then
         producer_config.sasl_config = {
             mechanism = conf.sasl_config.mechanism,
             username = conf.sasl_config.user,
             password = conf.sasl_config.password,
+        }
+    end
+
+    -- Add SSL config if present
+    if conf.ssl_config then
+        producer_config.ssl = true
+        producer_config.ssl_verify = false -- you may change to true if needed
+        producer_config.ssl_config = {
+            cafile = conf.ssl_config.cafile,
+            certfile = conf.ssl_config.certfile,
+            keyfile = conf.ssl_config.keyfile
         }
     end
 
@@ -208,7 +240,8 @@ function _M.log(conf, ctx)
     end
 
     local process = function(entries)
-        return send_to_kafka(conf, core.json.encode(entries))
+        local encoded = core.json.encode(entries)
+        return send_to_kafka(conf, encoded)
     end
 
     local bp_conf = {
