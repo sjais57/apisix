@@ -1,139 +1,55 @@
-test 1:
+Solution: Customize the kafka-logger Plugin to Support SSL (and SASL if needed)
+
+Step 1: Create a Custom Plugin Directory:
+
+mkdir -p /usr/local/apisix/plugins/custom-kafka-logger
+cp /usr/local/apisix/plugins/kafka-logger.lua /usr/local/apisix/plugins/custom-kafka-logger/init.lua
+
+
+Step 2: Modify the Plugin (init.lua):
+local producer = kafka_producer.new({
+    brokers = conf.brokers,
+    ssl = true,
+    ssl_verify = true, -- Set to true if you want server cert validation
+    ssl_cert = conf.ssl_cert,
+    ssl_key = conf.ssl_key,
+    ssl_key_passphrase = conf.ssl_key_passphrase,
+    ssl_ca_cert = conf.ssl_ca_cert,
+    sasl_config = {
+        mechanism = "PLAIN",
+        user = conf.sasl_user,
+        password = conf.sasl_password,
+    },
+    topic_metadata_refresh_interval = 30000
+})
+
+
+Step 3: Register Custom Plugin in config.yaml:
+plugin_attr:
+  enabled_plugins:
+    - custom-kafka-logger
+
+OR use standalone config:
+
+plugins:
+  - custom-kafka-logger
+
+
+Step 4: Use the Plugin in a Route
 {
-  "uri": "/your-api-endpoint",
   "plugins": {
-    "kafka-logger": {
-      "brokers": [
-        {
-          "host": "kafka-server1",
-          "port": 9092,
-          "weight": 1
-        },
-        {
-          "host": "kafka-server2",
-          "port": 9092,
-          "weight": 1
-        }
-      ],
-      "kafka_topic": "your-log-topic",  // Correct parameter name here
-      "producer": {
-        "request_timeout": 3000,
-        "socket_timeout": 3000,
-        "required_acks": 1
-      },
-      "buffer_duration": 60,
-      "max_retry_count": 3,
-      "retry_delay": 1,
-      "key": "api-logs",
-      "async": true,
-      "include_req_body": false,
-      "include_resp_body": false
-    }
-  },
-  "upstream": {
-    "type": "roundrobin",
-    "nodes": {
-      "your-backend-service:80": 1
+    "custom-kafka-logger": {
+      "brokers": ["broker1:9093", "broker2:9093"],
+      "kafka_topic": "apisix_logs",
+      "ssl_cert": "/etc/ssl/client.crt",
+      "ssl_key": "/etc/ssl/client.key",
+      "ssl_ca_cert": "/etc/ssl/ca.pem",
+      "sasl_user": "my-user",
+      "sasl_password": "my-password"
     }
   }
 }
 
 
-===============
-test 2:
 
-curl http://127.0.0.1:9180/apisix/admin/routes/1 -H 'X-API-KEY: your-admin-key' -X PUT -d '
-{
-  "uri": "/your-api-endpoint",
-  "plugins": {
-    "kafka-logger": {
-      "brokers": [
-        {"host": "kafka-server1", "port": 9092},
-        {"host": "kafka-server2", "port": 9092}
-      ],
-      "topic": "your-log-topic",
-      "producer": {
-        "request_timeout": 5000
-      }
-    }
-  },
-  "upstream": {
-    "nodes": {
-      "your-backend-service:80": 1
-    },
-    "type": "roundrobin"
-  }
-}'
-
-
-
-==========
-test 3:
-
-curl http://127.0.0.1:9180/apisix/admin/routes/1001 -X PUT -d '
-{
-  "uri": "/secure-logs",
-  "plugins": {
-    "kafka-logger": {
-      "brokers": [
-        {
-          "host": "your.kafka.host",
-          "port": 9093
-        }
-      ],
-      "topic": "your-kafka-topic",
-      "ssl": true,
-      "ssl_verify": false,
-      "ssl_cert": "/etc/ssl/certs/client-cert.pem",
-      "ssl_key": "/etc/ssl/private/client-key.pem",
-      "ssl_ca_cert": "/etc/ssl/certs/ca-cert.pem"
-    }
-  },
-  "upstream": {
-    "type": "roundrobin",
-    "nodes": {
-      "127.0.0.1:1980": 1
-    }
-  }
-}'
-
-
-====================
-
-curl http://127.0.0.1:9180/apisix/admin/routes/12345 -X PUT -d '
-{
-  "uri": "/test-kafka",
-  "plugins": {
-    "kafka-logger": {
-      "brokers": [
-        {
-          "host": "your.kafka.host",
-          "port": 9093
-        }
-      ],
-      "kafka_topic": "apisix-logs",
-      "producer_type": "async",
-      "buffer_duration": 60,
-      "retry_delay": 1,
-      "timeout": 3,
-      "batch_max_size": 1000,
-      "include_req_body": true,
-      "include_resp_body": false,
-      "key": "log-key",
-      "name": "custom-kafka-logger",
-      "sasl_config": {
-        "user": "your-username",
-        "password": "your-password",
-        "mechanism": "PLAIN"
-      },
-      "meta_format": "default"
-    }
-  },
-  "upstream": {
-    "type": "roundrobin",
-    "nodes": {
-      "127.0.0.1:9000": 1
-    }
-  }
-}'
 
