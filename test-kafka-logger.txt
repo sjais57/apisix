@@ -1,55 +1,30 @@
-Solution: Customize the kafka-logger Plugin to Support SSL (and SASL if needed)
-
-Step 1: Create a Custom Plugin Directory:
-
-mkdir -p /usr/local/apisix/plugins/custom-kafka-logger
-cp /usr/local/apisix/plugins/kafka-logger.lua /usr/local/apisix/plugins/custom-kafka-logger/init.lua
-
-
-Step 2: Modify the Plugin (init.lua):
-local producer = kafka_producer.new({
-    brokers = conf.brokers,
-    ssl = true,
-    ssl_verify = true, -- Set to true if you want server cert validation
-    ssl_cert = conf.ssl_cert,
-    ssl_key = conf.ssl_key,
-    ssl_key_passphrase = conf.ssl_key_passphrase,
-    ssl_ca_cert = conf.ssl_ca_cert,
-    sasl_config = {
-        mechanism = "PLAIN",
-        user = conf.sasl_user,
-        password = conf.sasl_password,
-    },
-    topic_metadata_refresh_interval = 30000
-})
-
-
-Step 3: Register Custom Plugin in config.yaml:
-plugin_attr:
-  enabled_plugins:
-    - custom-kafka-logger
-
-OR use standalone config:
-
-plugins:
-  - custom-kafka-logger
-
-
-Step 4: Use the Plugin in a Route
+[kafka]
+client = yes
+accept = 127.0.0.1:9092
+connect = kafka.example.com:9093
+CAfile = /etc/stunnel/ca.pem     # <-- CA cert (trusts server)
+cert = /etc/stunnel/client.crt   # <-- Client certificate (provided by Kafka admin)
+key = /etc/stunnel/client.key    # <-- Private key for client cert
+verify = 2
+=======
 {
+  "uri": "/test",
   "plugins": {
-    "custom-kafka-logger": {
-      "brokers": ["broker1:9093", "broker2:9093"],
-      "kafka_topic": "apisix_logs",
-      "ssl_cert": "/etc/ssl/client.crt",
-      "ssl_key": "/etc/ssl/client.key",
-      "ssl_ca_cert": "/etc/ssl/ca.pem",
-      "sasl_user": "my-user",
-      "sasl_password": "my-password"
+    "kafka-logger": {
+      "brokers": [
+        "127.0.0.1:9092"
+      ],
+      "kafka_topic": "apisix-logs",
+      "batch_max_size": 1,
+      "producer_type": "async",
+      "key": "apisix-key"             // Optional: message key
+      // You can add more options as needed
+    }
+  },
+  "upstream": {
+    "type": "roundrobin",
+    "nodes": {
+      "httpbin.org:80": 1
     }
   }
 }
-
-
-
-
