@@ -1,24 +1,21 @@
-curl -X PUT http://127.0.0.1:9180/apisix/admin/routes/sas2py-triton-route \
-  -H "X-API-KEY: your-api-key" \
+curl -X PUT http://127.0.0.1:9180/apisix/admin/routes/2001 \
+  -H "X-API-KEY: <your-admin-key>" \
   -H "Content-Type: application/json" \
   -d '{
-    "uri": "/fd/sas2py/triton/*",
-    "methods": ["POST", "GET"],
-    "plugins": {
-      "proxy-rewrite": {
-        "regex_uri": ["^/fd/sas2py/triton/(.*)", "/sas2py/triton/$1"]
-      }
-    },
-    "proxy_response_header": {
-      "delete": ["Content-Length", "Server", "Date"]
-    },
+    "uri": "/fd/sas2py/triton/generate",
+    "methods": ["POST"],
     "upstream": {
       "type": "roundrobin",
       "scheme": "https",
-      "pass_host": "rewrite",
       "nodes": {
-        "upstream.domain.com:443": 1
+        "upstream:port": 1
       },
-      "pass_headers": ["Authorization"]
+      "pass_host": "rewrite",
+      "upstream_host": "upstream"
+    },
+    "plugins": {
+      "proxy-rewrite": {
+        "regex_uri": ["/fd/sas2py/triton/generate", "/sas2py/triton/generate"]
+      }
     }
   }'
